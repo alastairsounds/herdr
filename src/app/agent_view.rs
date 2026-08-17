@@ -61,19 +61,32 @@ pub(crate) fn apply_agent_view(app: &AppState, entries: &mut Vec<AgentPanelEntry
         }
     }
 
-    if matches!(
-        app.agent_panel_sort,
-        crate::app::state::AgentPanelSort::Priority
-    ) {
-        entries.sort_by_key(|entry| {
-            (
-                std::cmp::Reverse(super::api_helpers::tab_attention_priority(
-                    entry.state,
-                    entry.seen,
-                )),
-                std::cmp::Reverse(entry.last_agent_state_change_seq),
-            )
-        });
+    match app.agent_panel_sort {
+        crate::app::state::AgentPanelSort::Priority => {
+            entries.sort_by_key(|entry| {
+                (
+                    std::cmp::Reverse(super::api_helpers::tab_attention_priority(
+                        entry.state,
+                        entry.seen,
+                    )),
+                    std::cmp::Reverse(entry.last_agent_state_change_seq),
+                )
+            });
+        }
+        crate::app::state::AgentPanelSort::Spaces => {
+            // Reuse the spaces panel's parent-then-children tree order so worktrees
+            // nest under their parent workspace here too, instead of trailing at
+            // wherever `app.workspaces` happened to append them.
+            let mut rank = std::collections::HashMap::new();
+            for (i, entry) in crate::ui::workspace_list_entries_expanded(app)
+                .into_iter()
+                .enumerate()
+            {
+                let crate::ui::WorkspaceListEntry::Workspace { ws_idx, .. } = entry;
+                rank.entry(ws_idx).or_insert(i);
+            }
+            entries.sort_by_key(|entry| rank.get(&entry.ws_idx).copied().unwrap_or(usize::MAX));
+        }
     }
 }
 
@@ -569,5 +582,44 @@ mod tests {
         assert!(validate_agent_view(&mut spec)
             .unwrap_err()
             .contains("context type"));
+    }
+
+    fn worktree_workspace(name: &str, key: &str, linked: bool) -> Workspace {
+        let mut ws = Workspace::test_new(name);
+        ws.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: key.into(),
+            label: "herdr".into(),
+            repo_root: std::path::PathBuf::from("/repo/herdr"),
+            checkout_path: std::path::PathBuf::from(format!("/repo/{name}")),
+            is_linked_worktree: linked,
+        });
+        ws
+    }
+
+    #[test]
+    fn spaces_sort_nests_worktrees_under_their_parent() {
+        let mut state = AppState::test_new();
+        // Creation order interleaves an unrelated workspace between a parent
+        // and the worktree that was linked to it afterward, the way
+        // `app.workspaces` fills up in practice.
+        state.workspaces = vec![
+            worktree_workspace("main", "repo-key", false),
+            Workspace::test_new("other"),
+            worktree_workspace("feature", "repo-key", true),
+        ];
+        state.ensure_test_terminals();
+        state.active = Some(0);
+        state.selected = 0;
+        for ws_idx in 0..state.workspaces.len() {
+            let pane_id = state.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = state.workspaces[ws_idx].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            state.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Claude);
+        }
+
+        let entries = crate::ui::agent_panel_entries(&state);
+        let ws_order: Vec<usize> = entries.iter().map(|entry| entry.ws_idx).collect();
+        assert_eq!(ws_order, vec![0, 2, 1]);
     }
 }
