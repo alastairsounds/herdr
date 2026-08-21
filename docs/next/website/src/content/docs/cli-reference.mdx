@@ -278,7 +278,9 @@ herdr pane report-metadata <pane_id> \
 
 `STATUS` is one of `idle`, `working`, `blocked`, `done`, or `unknown`. `--agent` and `--applies-to-source` guard only `--title`, `--display-agent`, and `--state-label`. They do not guard token patches; token reporters own clearing or TTL refresh. Use `--display-agent` to change the visible name.
 
-Metadata text is normalized before storage. Herdr trims surrounding whitespace, removes control characters, and caps `--title`, `--display-agent`, each `--state-label`, and token values at 80 characters. Empty normalized token values clear that key.
+Herdr normalizes metadata text before storage. It trims surrounding whitespace and caps `--title`, `--display-agent`, each `--state-label`, and token values at 80 characters. It removes all control characters from `--title`, `--display-agent`, and `--state-label` values. Empty normalized token values clear that key.
+
+A token value can contain well-formed SGR color sequences such as `\x1b[32mtext\x1b[0m`. Herdr keeps these sequences and removes all other control characters. The sidebar can then render the token value as color and style.
 
 `--token` patches one named display value; `--clear-token` removes one. Unmentioned tokens remain unchanged. Pane tokens are available to Agent sidebar rows as `$name`; workspace tokens are available to Space rows. TTL applies independently to the token keys updated by that call.
 

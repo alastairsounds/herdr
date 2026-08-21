@@ -423,7 +423,9 @@ herdr pane report-metadata <pane_id> \
 
 Use `herdr workspace report-metadata` in the same way for custom Space tokens. Unreported custom tokens disappear.
 
-Metadata reporters provide values only; styling stays in the local sidebar configuration. See [CLI reference: report metadata](/docs/cli-reference/#panes) for limits, clearing, sequencing, and expiry.
+A reported token value can also contain SGR color codes, for example `\x1b[32mtext\x1b[0m`. Herdr renders these codes in the sidebar as foreground color and as bold, dim, italic, or underline text. Herdr does not render SGR background codes. Sidebar rows keep their own background. Only custom `$name` tokens support this. Built-in tokens such as `terminal_title` always render as plain text.
+
+Local sidebar configuration styling on that token, such as `fg` in the style table above, always overrides color from the reported value. Use this to keep one token color even when a script or plugin reports a different color. See [CLI reference: report metadata](/docs/cli-reference/#panes) for limits, clearing, sequencing, and expiry.
 
 Sidebar row settings affect only the expanded desktop sidebar. Collapsed and mobile views keep their compact layouts.
 
