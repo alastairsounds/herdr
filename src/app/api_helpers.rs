@@ -206,6 +206,8 @@ const MAX_METADATA_TOKEN_KEYS_PER_REQUEST: usize = 16;
 pub(super) const MAX_METADATA_TOKEN_KEYS_PER_RESOURCE: usize = 32;
 const MAX_METADATA_TOKEN_KEY_LEN: usize = 32;
 const MAX_METADATA_TOKEN_VALUE_LEN: usize = 80;
+/// Raw byte limit, escapes included, apart from the visible-content limit.
+const MAX_METADATA_TOKEN_RAW_LEN: usize = 400;
 
 pub(super) fn normalize_metadata_source(value: String) -> Result<String, &'static str> {
     let value = value.trim();
@@ -278,9 +280,13 @@ pub(super) fn normalize_metadata_tokens(
 fn sanitize_metadata_value(value: &str) -> String {
     let chars: Vec<char> = value.chars().collect();
     let mut output = String::new();
-    let mut output_len = 0usize;
+    let mut visible_len = 0usize;
+    let mut raw_len = 0usize;
     let mut i = 0;
-    while i < chars.len() && output_len < MAX_METADATA_TOKEN_VALUE_LEN {
+    while i < chars.len()
+        && visible_len < MAX_METADATA_TOKEN_VALUE_LEN
+        && raw_len < MAX_METADATA_TOKEN_RAW_LEN
+    {
         if chars[i] == '\u{1b}' && chars.get(i + 1) == Some(&'[') {
             let mut j = i + 2;
             while j < chars.len() && matches!(chars[j], '0'..='9' | ';') {
@@ -294,18 +300,19 @@ fn sanitize_metadata_value(value: &str) -> String {
             }
             if final_byte == 'm' {
                 let seq_len = j - i + 1;
-                if output_len + seq_len > MAX_METADATA_TOKEN_VALUE_LEN {
+                if raw_len + seq_len > MAX_METADATA_TOKEN_RAW_LEN {
                     break;
                 }
                 output.extend(chars[i..=j].iter().copied());
-                output_len += seq_len;
+                raw_len += seq_len;
             }
             i = j + 1;
             continue;
         }
         if !chars[i].is_control() {
             output.push(chars[i]);
-            output_len += 1;
+            visible_len += 1;
+            raw_len += 1;
         }
         i += 1;
     }
@@ -367,9 +374,11 @@ mod metadata_token_tests {
     }
 
     #[test]
-    fn sgr_sequence_that_would_be_cut_by_the_length_cap_is_dropped_whole() {
-        let filler = "a".repeat(MAX_METADATA_TOKEN_VALUE_LEN - 2);
-        let value = format!("{filler}\x1b[1;33m");
+    fn sgr_sequence_that_would_be_cut_by_the_raw_cap_is_dropped_whole() {
+        let filler = "a".repeat(MAX_METADATA_TOKEN_VALUE_LEN);
+        // Pushes raw_len near the raw cap.
+        let padding_sgr = "\x1b[1;33m".repeat(60);
+        let value = format!("{filler}{padding_sgr}\x1b[7;7;7;7;7;7;7;7;7;7;7;7;7;7;7;7;7;7;7;7m");
 
         let tokens = normalize_metadata_tokens(std::collections::HashMap::from([(
             "summary".into(),
@@ -377,7 +386,28 @@ mod metadata_token_tests {
         )]))
         .unwrap();
 
-        assert_eq!(tokens["summary"].as_deref(), Some(filler.as_str()));
+        // the final, oversized sequence must not appear truncated mid-escape
+        let stored = tokens["summary"].as_deref().unwrap();
+        assert!(!stored.contains("\x1b[7;7;7"));
+    }
+
+    #[test]
+    fn visible_content_survives_preceding_sgr_color_overhead() {
+        // Escape bytes must not reduce the visible-content budget.
+        let value =
+            "\x1b[38;2;222;165;132m\u{f1617} \x1b[0m \x1b[38;2;46;139;78mfeat/starship-color\x1b[0m \x1b[38;5;178m!1\x1b[0m".to_string();
+
+        let tokens = normalize_metadata_tokens(std::collections::HashMap::from([(
+            "summary".into(),
+            Some(value),
+        )]))
+        .unwrap();
+
+        let stored = tokens["summary"].as_deref().unwrap();
+        assert!(
+            stored.ends_with("!1\x1b[0m"),
+            "stored value was: {stored:?}"
+        );
     }
 
     #[test]
