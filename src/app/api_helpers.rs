@@ -265,17 +265,51 @@ pub(super) fn normalize_metadata_tokens(
                 return Err(format!("invalid metadata token key: {key}"));
             }
             let value = value.and_then(|value| {
-                let normalized = value
-                    .trim()
-                    .chars()
-                    .filter(|ch| !ch.is_control())
-                    .take(MAX_METADATA_TOKEN_VALUE_LEN)
-                    .collect::<String>();
+                let normalized = sanitize_metadata_value(value.trim());
                 (!normalized.trim().is_empty()).then(|| normalized.trim().to_string())
             });
             Ok((key, value))
         })
         .collect()
+}
+
+/// Sanitizes metadata values, preserving valid SGR colors that fit within
+/// `MAX_METADATA_TOKEN_VALUE_LEN`.
+fn sanitize_metadata_value(value: &str) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let mut output = String::new();
+    let mut output_len = 0usize;
+    let mut i = 0;
+    while i < chars.len() && output_len < MAX_METADATA_TOKEN_VALUE_LEN {
+        if chars[i] == '\u{1b}' && chars.get(i + 1) == Some(&'[') {
+            let mut j = i + 2;
+            while j < chars.len() && matches!(chars[j], '0'..='9' | ';') {
+                j += 1;
+            }
+            let Some(&final_byte) = chars.get(j) else {
+                break; // unterminated CSI sequence: nothing safe to keep
+            };
+            if !matches!(final_byte, '\u{40}'..='\u{7e}') {
+                break; // not a valid CSI final byte; fail closed rather than guess
+            }
+            if final_byte == 'm' {
+                let seq_len = j - i + 1;
+                if output_len + seq_len > MAX_METADATA_TOKEN_VALUE_LEN {
+                    break;
+                }
+                output.extend(chars[i..=j].iter().copied());
+                output_len += seq_len;
+            }
+            i = j + 1;
+            continue;
+        }
+        if !chars[i].is_control() {
+            output.push(chars[i]);
+            output_len += 1;
+        }
+        i += 1;
+    }
+    output
 }
 
 #[cfg(test)]
@@ -294,6 +328,67 @@ mod metadata_token_tests {
         assert_eq!(tokens["summary"].as_deref(), Some("reviewready"));
         assert_eq!(tokens["empty"], None);
         assert_eq!(tokens["clear"], None);
+    }
+
+    #[test]
+    fn well_formed_sgr_sequences_survive_normalization() {
+        let tokens = normalize_metadata_tokens(std::collections::HashMap::from([(
+            "summary".into(),
+            Some("\x1b[1;33mfoo\x1b[0m".into()),
+        )]))
+        .unwrap();
+
+        assert_eq!(tokens["summary"].as_deref(), Some("\x1b[1;33mfoo\x1b[0m"));
+    }
+
+    #[test]
+    fn non_sgr_csi_sequences_are_dropped() {
+        let tokens = normalize_metadata_tokens(std::collections::HashMap::from([(
+            "summary".into(),
+            Some("\x1b[2Jfoo\x1b[1;33mbar".into()),
+        )]))
+        .unwrap();
+
+        assert_eq!(tokens["summary"].as_deref(), Some("foo\x1b[1;33mbar"));
+    }
+
+    #[test]
+    fn other_control_characters_are_still_stripped_alongside_sgr() {
+        let tokens = normalize_metadata_tokens(std::collections::HashMap::from([(
+            "summary".into(),
+            Some("\x1b[1;33mfoo\nbar\x1b[0m".into()),
+        )]))
+        .unwrap();
+
+        assert_eq!(
+            tokens["summary"].as_deref(),
+            Some("\x1b[1;33mfoobar\x1b[0m")
+        );
+    }
+
+    #[test]
+    fn sgr_sequence_that_would_be_cut_by_the_length_cap_is_dropped_whole() {
+        let filler = "a".repeat(MAX_METADATA_TOKEN_VALUE_LEN - 2);
+        let value = format!("{filler}\x1b[1;33m");
+
+        let tokens = normalize_metadata_tokens(std::collections::HashMap::from([(
+            "summary".into(),
+            Some(value),
+        )]))
+        .unwrap();
+
+        assert_eq!(tokens["summary"].as_deref(), Some(filler.as_str()));
+    }
+
+    #[test]
+    fn unterminated_trailing_escape_is_dropped_without_panicking() {
+        let tokens = normalize_metadata_tokens(std::collections::HashMap::from([(
+            "summary".into(),
+            Some("foo\x1b[1;3".into()),
+        )]))
+        .unwrap();
+
+        assert_eq!(tokens["summary"].as_deref(), Some("foo"));
     }
 
     #[test]

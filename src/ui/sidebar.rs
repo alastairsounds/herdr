@@ -1,3 +1,4 @@
+mod sgr;
 mod tokens;
 
 use ratatui::{
@@ -1031,17 +1032,28 @@ fn resolved_token_spans(
             _ => 0,
         })
         .collect::<Vec<_>>();
-    let flexible_widths = resolved
+    let custom_segments = resolved
         .iter()
         .map(|token| match &token.kind {
+            ResolvedTokenKind::Custom(text) => sgr::parse_sgr_segments(text),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let flexible_widths = resolved
+        .iter()
+        .enumerate()
+        .map(|(index, token)| match &token.kind {
             ResolvedTokenKind::StateText(text)
             | ResolvedTokenKind::Workspace(text)
             | ResolvedTokenKind::Tab(text)
             | ResolvedTokenKind::Pane(text)
             | ResolvedTokenKind::Agent(text)
             | ResolvedTokenKind::TerminalTitle(text)
-            | ResolvedTokenKind::Branch(text)
-            | ResolvedTokenKind::Custom(text) => display_width(text),
+            | ResolvedTokenKind::Branch(text) => display_width(text),
+            ResolvedTokenKind::Custom(text) => custom_segments[index].as_ref().map_or_else(
+                || display_width(text),
+                |segments| display_width(&sgr::plain_text(segments)),
+            ),
             _ => 0,
         })
         .collect::<Vec<_>>();
@@ -1174,12 +1186,30 @@ fn resolved_token_spans(
                     ));
                 }
             }
-            ResolvedTokenKind::TerminalTitle(text) | ResolvedTokenKind::Custom(text) => {
+            ResolvedTokenKind::TerminalTitle(text) => {
                 spans.push(Span::styled(
                     truncate_end(text, budgets[index]),
                     apply_token_style(custom_style, token.style),
                 ));
             }
+            ResolvedTokenKind::Custom(text) => match &custom_segments[index] {
+                Some(segments) => {
+                    for (segment_text, segment_style) in
+                        sgr::truncate_segments(segments, budgets[index])
+                    {
+                        spans.push(Span::styled(
+                            segment_text,
+                            apply_token_style(custom_style.patch(segment_style), token.style),
+                        ));
+                    }
+                }
+                None => {
+                    spans.push(Span::styled(
+                        truncate_end(text, budgets[index]),
+                        apply_token_style(custom_style, token.style),
+                    ));
+                }
+            },
         }
     }
     spans
@@ -1962,6 +1992,83 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(spans
             .iter()
             .all(|span| { span.style.fg == Some(ratatui::style::Color::Rgb(0x12, 0x34, 0x56)) }));
+    }
+
+    #[test]
+    fn custom_token_with_embedded_sgr_renders_as_multiple_styled_spans() {
+        let spans = resolved_token_spans(
+            &[ResolvedToken::unstyled(ResolvedTokenKind::Custom(
+                "\x1b[31mred\x1b[32mgreen".into(),
+            ))],
+            ("", Style::default()),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            &crate::app::state::AppState::test_new().palette,
+            20,
+        );
+
+        assert_eq!(
+            spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["red", "green"]
+        );
+        assert_eq!(spans[0].style.fg, Some(ratatui::style::Color::Indexed(1)));
+        assert_eq!(spans[1].style.fg, Some(ratatui::style::Color::Indexed(2)));
+    }
+
+    #[test]
+    fn custom_token_config_style_overrides_embedded_sgr_color() {
+        let config: crate::config::Config = toml::from_str(
+            r##"[ui.sidebar.agents]
+rows = [[{ token = "$summary", fg = "#123456" }]]
+"##,
+        )
+        .unwrap();
+        let spans = resolved_token_spans(
+            &[ResolvedToken {
+                kind: ResolvedTokenKind::Custom("\x1b[31mred".into()),
+                style: config.ui.sidebar.agents.rows[0][0].parts().1,
+            }],
+            ("", Style::default()),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            &crate::app::state::AppState::test_new().palette,
+            20,
+        );
+
+        assert_eq!(
+            spans[0].style.fg,
+            Some(ratatui::style::Color::Rgb(0x12, 0x34, 0x56))
+        );
+    }
+
+    #[test]
+    fn custom_token_sgr_escape_bytes_do_not_count_toward_width_budget() {
+        let spans = resolved_token_spans(
+            &[ResolvedToken::unstyled(ResolvedTokenKind::Custom(
+                "\x1b[38;2;1;2;3mhello world".into(),
+            ))],
+            ("", Style::default()),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            &crate::app::state::AppState::test_new().palette,
+            8,
+        );
+
+        let text = spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(text, "hello w…");
+        assert_eq!(display_width(&text), 8);
     }
 
     #[test]
