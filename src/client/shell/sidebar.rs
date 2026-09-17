@@ -294,7 +294,9 @@ pub(crate) fn render_sidebar(
             break;
         }
         let rect = Rect::new(body.x, y, content_width, row_height);
-        let selected = state.selected_workspace_id == Some(workspace.workspace_id.as_str());
+        let selected = state.selected_workspace_id.is_some_and(|target| {
+            target.matches(state.active_endpoint_id, &workspace.workspace_id)
+        });
         let dragged = state.dragged_workspace_id == Some(workspace.workspace_id.as_str());
         if selected {
             buffer.set_style(rect, Style::default().bg(palette.selection_bg));
@@ -701,9 +703,7 @@ pub(in crate::client::shell) fn render_workspace_rows(
                 status_icon(status, indicators),
                 Style::default().fg(status_color(status, palette)),
             ),
-            Style::default()
-                .fg(status_color(status, palette))
-                .add_modifier(Modifier::DIM),
+            Style::default().fg(status_color(status, palette)),
             workspace_style,
             secondary_style,
             Style::default().fg(palette.overlay1),
